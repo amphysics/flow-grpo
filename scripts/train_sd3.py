@@ -333,6 +333,8 @@ def save_ckpt(save_dir, transformer, global_step, accelerator, ema, transformer_
 
 def main(_):
     # basic Accelerate and logging setup
+
+    wandb.login(key="78a0e78fa8af04aa844f081675afd2202413adda")
     config = FLAGS.config
 
     unique_id = datetime.datetime.now().strftime("%Y.%m.%d_%H.%M.%S")

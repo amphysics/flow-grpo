@@ -4,6 +4,7 @@
 # - It returns all the intermediate latents of the denoising process as well as the log probs of each denoising step.
 from typing import Any, Dict, List, Optional, Union
 import torch
+import random
 from diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3 import retrieve_timesteps
 from .sd3_sde_with_logprob import sde_step_with_logprob
 
@@ -16,12 +17,12 @@ def pipeline_with_logprob(
     height: Optional[int] = None,
     width: Optional[int] = None,
     num_inference_steps: int = 28,
+    mini_num_image_per_prompt: int = 1,
     sigmas: Optional[List[float]] = None,
     guidance_scale: float = 7.0,
     negative_prompt: Optional[Union[str, List[str]]] = None,
     negative_prompt_2: Optional[Union[str, List[str]]] = None,
     negative_prompt_3: Optional[Union[str, List[str]]] = None,
-    num_images_per_prompt: Optional[int] = 1,
     generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
     latents: Optional[torch.FloatTensor] = None,
     prompt_embeds: Optional[torch.FloatTensor] = None,
@@ -35,6 +36,10 @@ def pipeline_with_logprob(
     max_sequence_length: int = 256,
     skip_layer_guidance_scale: float = 2.8,
     noise_level: float = 0.7,
+    train_num_steps: int = 1,
+    process_index: int = 0,
+    sample_num_steps: int = 10,
+    random_timestep: Optional[int] = None,
 ):
     height = height or self.default_sample_size * self.vae_scale_factor
     width = width or self.default_sample_size * self.vae_scale_factor
@@ -95,18 +100,14 @@ def pipeline_with_logprob(
         negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
         device=device,
         clip_skip=self.clip_skip,
-        num_images_per_prompt=num_images_per_prompt,
         max_sequence_length=max_sequence_length,
         lora_scale=lora_scale,
     )
-    if self.do_classifier_free_guidance:
-        prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
-        pooled_prompt_embeds = torch.cat([negative_pooled_prompt_embeds, pooled_prompt_embeds], dim=0)
-
+    
     # 4. Prepare latent variables
     num_channels_latents = self.transformer.config.in_channels
     latents = self.prepare_latents(
-        batch_size * num_images_per_prompt,
+        batch_size,
         num_channels_latents,
         height,
         width,
@@ -128,16 +129,40 @@ def pipeline_with_logprob(
     num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
     self._num_timesteps = len(timesteps)
 
-    # 6. Prepare image embeddings
-    all_latents = [latents]
-    all_log_probs = []
+    random.seed(process_index)
+    if random_timestep is None:
+        random_timestep = random.randint(0, sample_num_steps//2)
 
+
+    # 6. Prepare image embeddings
+    all_latents = []
+    all_log_probs = []
+    all_timesteps = []
+
+    if self.do_classifier_free_guidance:
+        tem_prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
+        tem_pooled_prompt_embeds = torch.cat([negative_pooled_prompt_embeds, pooled_prompt_embeds], dim=0)
     # 7. Denoising loop
     with self.progress_bar(total=num_inference_steps) as progress_bar:
         for i, t in enumerate(timesteps):
-            if self.interrupt:
-                continue
-
+            if i < random_timestep:
+                cur_noise_level = 0
+            elif i == random_timestep:
+                cur_noise_level= noise_level
+                # 将latents repeat mini_num_image_per_prompt次
+                latents = latents.repeat(mini_num_image_per_prompt, 1, 1, 1)
+                prompt_embeds = prompt_embeds.repeat(mini_num_image_per_prompt, 1, 1)
+                pooled_prompt_embeds = pooled_prompt_embeds.repeat(mini_num_image_per_prompt, 1)
+                negative_prompt_embeds = negative_prompt_embeds.repeat(mini_num_image_per_prompt, 1, 1)
+                negative_pooled_prompt_embeds = negative_pooled_prompt_embeds.repeat(mini_num_image_per_prompt, 1)
+                if self.do_classifier_free_guidance:
+                    tem_prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
+                    tem_pooled_prompt_embeds = torch.cat([negative_pooled_prompt_embeds, pooled_prompt_embeds], dim=0)
+                all_latents.append(latents)
+            elif i > random_timestep and i < random_timestep + train_num_steps:
+                cur_noise_level = noise_level
+            else:
+                cur_noise_level= 0
             # expand the latents if we are doing classifier free guidance
             latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
             # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
@@ -145,8 +170,8 @@ def pipeline_with_logprob(
             noise_pred = self.transformer(
                 hidden_states=latent_model_input,
                 timestep=timestep,
-                encoder_hidden_states=prompt_embeds,
-                pooled_projections=pooled_prompt_embeds,
+                encoder_hidden_states=tem_prompt_embeds,
+                pooled_projections=tem_pooled_prompt_embeds,
                 joint_attention_kwargs=self.joint_attention_kwargs,
                 return_dict=False,
             )[0]
@@ -163,17 +188,20 @@ def pipeline_with_logprob(
                 noise_pred.float(), 
                 t.unsqueeze(0), 
                 latents.float(),
-                noise_level=noise_level,
+                noise_level=cur_noise_level,
             )
-            
-            all_latents.append(latents)
-            all_log_probs.append(log_prob)
+                
             # if latents.dtype != latents_dtype:
             #     latents = latents.to(latents_dtype)
             
-            # call the callback, if provided
+            if i >= random_timestep and i < random_timestep + train_num_steps:
+                all_latents.append(latents)
+                all_log_probs.append(log_prob)
+                all_timesteps.append(t.repeat(len(latents)))
+            
             if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                 progress_bar.update()
+            
 
     latents = (latents / self.vae.config.scaling_factor) + self.vae.config.shift_factor
     latents = latents.to(dtype=self.vae.dtype)
@@ -182,5 +210,4 @@ def pipeline_with_logprob(
 
     # Offload all models
     self.maybe_free_model_hooks()
-
-    return image, all_latents, all_log_probs
+    return image, all_latents, all_log_probs, all_timesteps

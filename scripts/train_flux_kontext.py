@@ -11,15 +11,20 @@ from accelerate import Accelerator
 from ml_collections import config_flags
 from accelerate.utils import set_seed, ProjectConfiguration
 from accelerate.logging import get_logger
-from diffusers import StableDiffusion3Pipeline
+from diffusers import FluxKontextPipeline
 from diffusers.utils.torch_utils import is_compiled_module
+from transformers.integrations.deepspeed import (
+    is_deepspeed_zero3_enabled,
+    set_hf_deepspeed_config,
+    unset_hf_deepspeed_config,
+)
 import numpy as np
 import flow_grpo.prompts
 import flow_grpo.rewards
 from flow_grpo.stat_tracking import PerPromptStatTracker
-from flow_grpo.diffusers_patch.sd3_pipeline_with_logprob import pipeline_with_logprob
+from flow_grpo.diffusers_patch.flux_kontext_pipeline_with_logprob import pipeline_with_logprob
 from flow_grpo.diffusers_patch.sd3_sde_with_logprob import sde_step_with_logprob
-from flow_grpo.diffusers_patch.train_dreambooth_lora_sd3 import encode_prompt
+from flow_grpo.diffusers_patch.train_dreambooth_lora_flux import encode_prompt
 import torch
 import wandb
 from functools import partial
@@ -33,32 +38,14 @@ from flow_grpo.ema import EMAModuleWrapper
 
 tqdm = partial(tqdm.tqdm, dynamic_ncols=True)
 
-
 FLAGS = flags.FLAGS
 config_flags.DEFINE_config_file("config", "config/base.py", "Training configuration.")
 
 logger = get_logger(__name__)
 
-class TextPromptDataset(Dataset):
+class GenevalPromptImageDataset(Dataset):
     def __init__(self, dataset, split='train'):
-        self.file_path = os.path.join(dataset, f'{split}.txt')
-        with open(self.file_path, 'r') as f:
-            self.prompts = [line.strip() for line in f.readlines()]
-        
-    def __len__(self):
-        return len(self.prompts)
-    
-    def __getitem__(self, idx):
-        return {"prompt": self.prompts[idx], "metadata": {}}
-
-    @staticmethod
-    def collate_fn(examples):
-        prompts = [example["prompt"] for example in examples]
-        metadatas = [example["metadata"] for example in examples]
-        return prompts, metadatas
-
-class GenevalPromptDataset(Dataset):
-    def __init__(self, dataset, split='train'):
+        self.dataset = dataset
         self.file_path = os.path.join(dataset, f'{split}_metadata.jsonl')
         with open(self.file_path, 'r', encoding='utf-8') as f:
             self.metadatas = [json.loads(line) for line in f]
@@ -68,13 +55,24 @@ class GenevalPromptDataset(Dataset):
         return len(self.prompts)
     
     def __getitem__(self, idx):
-        return {"prompt": self.prompts[idx], "metadata": self.metadatas[idx]}
+        item = {
+            "prompt": self.prompts[idx],
+            "metadata": self.metadatas[idx]
+        }
+        # Assuming 'image' in metadata contains a path to the image file
+        image_path = self.metadatas[idx]['image']
+        item["prompt_with_image_path"] = f"{self.prompts[idx]}_{image_path}"
+        image = Image.open(os.path.join(self.dataset, image_path)).convert('RGB')
+        item["image"] = image
+        return item
 
     @staticmethod
     def collate_fn(examples):
         prompts = [example["prompt"] for example in examples]
         metadatas = [example["metadata"] for example in examples]
-        return prompts, metadatas
+        images = [example["image"] for example in examples]
+        prompt_with_image_paths = [example["prompt_with_image_path"] for example in examples]
+        return prompts, metadatas, images, prompt_with_image_paths
 
 class DistributedKRepeatSampler(Sampler):
     def __init__(self, dataset, batch_size, k, num_replicas, rank, seed=0):
@@ -123,11 +121,12 @@ class DistributedKRepeatSampler(Sampler):
 
 def compute_text_embeddings(prompt, text_encoders, tokenizers, max_sequence_length, device):
     with torch.no_grad():
-        prompt_embeds, pooled_prompt_embeds = encode_prompt(
+        prompt_embeds, pooled_prompt_embeds, text_ids = encode_prompt(
             text_encoders, tokenizers, prompt, max_sequence_length
         )
         prompt_embeds = prompt_embeds.to(device)
         pooled_prompt_embeds = pooled_prompt_embeds.to(device)
+        text_ids = text_ids.to(device)
     return prompt_embeds, pooled_prompt_embeds
 
 def calculate_zero_std_ratio(prompts, gathered_rewards):
@@ -176,36 +175,36 @@ def create_generator(prompts, base_seed):
         gen = torch.Generator().manual_seed(seed)
         generators.append(gen)
     return generators
-
         
-def compute_log_prob(transformer, pipeline, sample, j, embeds, pooled_embeds, config):
-    if config.train.cfg:
-        noise_pred = transformer(
-            hidden_states=torch.cat([sample["latents"][:, j]] * 2),
-            timestep=torch.cat([sample["timesteps"][:, j]] * 2),
-            encoder_hidden_states=embeds,
-            pooled_projections=pooled_embeds,
-            return_dict=False,
-        )[0]
-        noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-        noise_pred = (
-            noise_pred_uncond
-            + config.sample.guidance_scale
-            * (noise_pred_text - noise_pred_uncond)
-        )
+def compute_log_prob(transformer, pipeline, sample, j, config):
+    latents = sample["latents"][:, j]
+    device = latents.device
+    dtype = latents.dtype
+    if transformer.module.config.guidance_embeds:
+        guidance = torch.tensor([config.sample.guidance_scale], device=device)
+        guidance = guidance.expand(latents.shape[0])
     else:
-        noise_pred = transformer(
-            hidden_states=sample["latents"][:, j],
-            timestep=sample["timesteps"][:, j],
-            encoder_hidden_states=embeds,
-            pooled_projections=pooled_embeds,
-            return_dict=False,
-        )[0]
-    
+        guidance = None
+
+    # Predict the noise residual
+    latent_model_input = sample["latents"][:, j]
+    if sample["image_latents"] is not None:
+        latent_model_input = torch.cat([latent_model_input, sample["image_latents"]],dim=1)
+    model_pred = transformer(
+        hidden_states=latent_model_input,
+        timestep=sample["timesteps"][:, j] / 1000,
+        guidance=guidance,
+        pooled_projections=sample["pooled_prompt_embeds"],
+        encoder_hidden_states=sample["prompt_embeds"],
+        txt_ids= sample["text_ids"][0],
+        img_ids=sample["latent_ids"][0],
+        return_dict=False,
+    )[0]
+    model_pred = model_pred[:, : sample["latents"][:, j].size(1)]
     # compute the log prob of next_latents given latents under the current model
     prev_sample, log_prob, prev_sample_mean, std_dev_t = sde_step_with_logprob(
         pipeline.scheduler,
-        noise_pred.float(),
+        model_pred.float(),
         sample["timesteps"][:, j],
         sample["latents"][:, j].float(),
         prev_sample=sample["next_latents"][:, j].float(),
@@ -217,10 +216,6 @@ def compute_log_prob(transformer, pipeline, sample, j, embeds, pooled_embeds, co
 def eval(pipeline, test_dataloader, text_encoders, tokenizers, config, accelerator, global_step, reward_fn, executor, autocast, num_train_timesteps, ema, transformer_trainable_parameters):
     if config.train.ema:
         ema.copy_ema_to(transformer_trainable_parameters, store_temp=True)
-    neg_prompt_embed, neg_pooled_prompt_embed = compute_text_embeddings([""], text_encoders, tokenizers, max_sequence_length=128, device=accelerator.device)
-
-    sample_neg_prompt_embeds = neg_prompt_embed.repeat(config.sample.test_batch_size, 1, 1)
-    sample_neg_pooled_prompt_embeds = neg_pooled_prompt_embed.repeat(config.sample.test_batch_size, 1)
 
     # test_dataloader = itertools.islice(test_dataloader, 2)
     all_rewards = defaultdict(list)
@@ -230,7 +225,8 @@ def eval(pipeline, test_dataloader, text_encoders, tokenizers, config, accelerat
             disable=not accelerator.is_local_main_process,
             position=0,
         ):
-        prompts, prompt_metadata = test_batch
+        prompts, prompt_metadata, ref_images, _ = test_batch
+        ref_images = [ref_image.resize((config.resolution, config.resolution)) for ref_image in ref_images]
         prompt_embeds, pooled_prompt_embeds = compute_text_embeddings(
             prompts, 
             text_encoders, 
@@ -238,26 +234,22 @@ def eval(pipeline, test_dataloader, text_encoders, tokenizers, config, accelerat
             max_sequence_length=128, 
             device=accelerator.device
         )
-        # The last batch may not be full batch_size
-        if len(prompt_embeds)<len(sample_neg_prompt_embeds):
-            sample_neg_prompt_embeds = sample_neg_prompt_embeds[:len(prompt_embeds)]
-            sample_neg_pooled_prompt_embeds = sample_neg_pooled_prompt_embeds[:len(prompt_embeds)]
         with autocast():
             with torch.no_grad():
-                images, _, _ = pipeline_with_logprob(
+                images, _, _, _, _, _ = pipeline_with_logprob(
                     pipeline,
+                    image=ref_images,
                     prompt_embeds=prompt_embeds,
                     pooled_prompt_embeds=pooled_prompt_embeds,
-                    negative_prompt_embeds=sample_neg_prompt_embeds,
-                    negative_pooled_prompt_embeds=sample_neg_pooled_prompt_embeds,
                     num_inference_steps=config.sample.eval_num_steps,
                     guidance_scale=config.sample.guidance_scale,
                     output_type="pt",
                     height=config.resolution,
                     width=config.resolution, 
+                    max_area=config.resolution*config.resolution,
                     noise_level=0,
                 )
-        rewards = executor.submit(reward_fn, images, prompts, prompt_metadata, only_strict=False)
+        rewards = executor.submit(reward_fn, images, prompts, prompt_metadata, ref_images, only_strict=False)
         # yield to to make sure reward computation starts
         time.sleep(0)
         rewards, reward_metadata = rewards.result()
@@ -266,7 +258,7 @@ def eval(pipeline, test_dataloader, text_encoders, tokenizers, config, accelerat
             rewards_gather = accelerator.gather(torch.as_tensor(value, device=accelerator.device)).cpu().numpy()
             all_rewards[key].append(rewards_gather)
     
-    last_batch_images_gather = accelerator.gather(torch.as_tensor(images, device=accelerator.device)).cpu().numpy()
+    last_batch_images_gather = accelerator.gather(torch.as_tensor(images, device=accelerator.device)).float().cpu().numpy()
     last_batch_prompt_ids = tokenizers[0](
         prompts,
         padding="max_length",
@@ -274,13 +266,13 @@ def eval(pipeline, test_dataloader, text_encoders, tokenizers, config, accelerat
         truncation=True,
         return_tensors="pt",
     ).input_ids.to(accelerator.device)
-    last_batch_prompt_ids_gather = accelerator.gather(last_batch_prompt_ids).cpu().numpy()
+    last_batch_prompt_ids_gather = accelerator.gather(last_batch_prompt_ids).float().cpu().numpy()
     last_batch_prompts_gather = pipeline.tokenizer.batch_decode(
         last_batch_prompt_ids_gather, skip_special_tokens=True
     )
     last_batch_rewards_gather = {}
     for key, value in rewards.items():
-        last_batch_rewards_gather[key] = accelerator.gather(torch.as_tensor(value, device=accelerator.device)).cpu().numpy()
+        last_batch_rewards_gather[key] = accelerator.gather(torch.as_tensor(value, device=accelerator.device)).float().cpu().numpy()
 
     all_rewards = {key: np.concatenate(value) for key, value in all_rewards.items()}
     if accelerator.is_main_process:
@@ -291,7 +283,7 @@ def eval(pipeline, test_dataloader, text_encoders, tokenizers, config, accelerat
             for idx, index in enumerate(sample_indices):
                 image = last_batch_images_gather[index]
                 pil = Image.fromarray(
-                    (image.transpose(1, 2, 0) * 255).astype(np.uint8)
+                    (image.transpose(1, 2, 0) * 255).astype(np.float32).astype(np.uint8)
                 )
                 pil = pil.resize((config.resolution, config.resolution))
                 pil.save(os.path.join(tmpdir, f"{idx}.jpg"))
@@ -362,6 +354,7 @@ def main(_):
     if accelerator.is_main_process:
         wandb.init(
             project="flow_grpo",
+            # mode="disabled"
         )
         # accelerator.init_trackers(
         #     project_name="flow-grpo",
@@ -374,18 +367,18 @@ def main(_):
     set_seed(config.seed, device_specific=True)
 
     # load scheduler, tokenizer and models.
-    pipeline = StableDiffusion3Pipeline.from_pretrained(
-        config.pretrained.model
+    pipeline = FluxKontextPipeline.from_pretrained(
+        config.pretrained.model,
+        low_cpu_mem_usage=False
     )
     # freeze parameters of models to save more memory
     pipeline.vae.requires_grad_(False)
     pipeline.text_encoder.requires_grad_(False)
     pipeline.text_encoder_2.requires_grad_(False)
-    pipeline.text_encoder_3.requires_grad_(False)
     pipeline.transformer.requires_grad_(not config.use_lora)
 
-    text_encoders = [pipeline.text_encoder, pipeline.text_encoder_2, pipeline.text_encoder_3]
-    tokenizers = [pipeline.tokenizer, pipeline.tokenizer_2, pipeline.tokenizer_3]
+    text_encoders = [pipeline.text_encoder, pipeline.text_encoder_2]
+    tokenizers = [pipeline.tokenizer, pipeline.tokenizer_2]
 
     # disable safety checker
     pipeline.safety_checker = None
@@ -407,28 +400,32 @@ def main(_):
         inference_dtype = torch.bfloat16
 
     # Move vae and text_encoder to device and cast to inference_dtype
-    pipeline.vae.to(accelerator.device, dtype=torch.float32)
+    pipeline.vae.to(accelerator.device, dtype=inference_dtype)
     pipeline.text_encoder.to(accelerator.device, dtype=inference_dtype)
     pipeline.text_encoder_2.to(accelerator.device, dtype=inference_dtype)
-    pipeline.text_encoder_3.to(accelerator.device, dtype=inference_dtype)
     
     pipeline.transformer.to(accelerator.device)
 
     if config.use_lora:
         # Set correct lora layers
         target_modules = [
+            "attn.to_k",
+            "attn.to_q",
+            "attn.to_v",
+            "attn.to_out.0",
             "attn.add_k_proj",
             "attn.add_q_proj",
             "attn.add_v_proj",
             "attn.to_add_out",
-            "attn.to_k",
-            "attn.to_out.0",
-            "attn.to_q",
-            "attn.to_v",
+            "ff.net.0.proj",
+            "ff.net.2",
+            "ff_context.net.0.proj",
+            "ff_context.net.2",
+            "proj_mlp",
         ]
         transformer_lora_config = LoraConfig(
-            r=32,
-            lora_alpha=64,
+            r=64,
+            lora_alpha=128,
             init_lora_weights="gaussian",
             target_modules=target_modules,
         )
@@ -470,79 +467,32 @@ def main(_):
         eps=config.train.adam_epsilon,
     )
 
-    # prepare prompt and reward fn
-    reward_fn = getattr(flow_grpo.rewards, 'multi_score')(accelerator.device, config.reward_fn)
-    eval_reward_fn = getattr(flow_grpo.rewards, 'multi_score')(accelerator.device, config.reward_fn)
+    train_dataset = GenevalPromptImageDataset(config.dataset, 'train')
+    test_dataset = GenevalPromptImageDataset(config.dataset, 'test')
 
-    if config.prompt_fn == "general_ocr":
-        train_dataset = TextPromptDataset(config.dataset, 'train')
-        test_dataset = TextPromptDataset(config.dataset, 'test')
+    train_sampler = DistributedKRepeatSampler( 
+        dataset=train_dataset,
+        batch_size=config.sample.train_batch_size,
+        k=config.sample.num_image_per_prompt,
+        num_replicas=accelerator.num_processes,
+        rank=accelerator.process_index,
+        seed=42
+    )
 
-        # Create an infinite-loop DataLoader
-        train_sampler = DistributedKRepeatSampler( 
-            dataset=train_dataset,
-            batch_size=config.sample.train_batch_size,
-            k=config.sample.num_image_per_prompt,
-            num_replicas=accelerator.num_processes,
-            rank=accelerator.process_index,
-            seed=42
-        )
-
-        # Create a DataLoader; note that shuffling is not needed here because it’s controlled by the Sampler.
-        train_dataloader = DataLoader(
-            train_dataset,
-            batch_sampler=train_sampler,
-            num_workers=1,
-            collate_fn=TextPromptDataset.collate_fn,
-            # persistent_workers=True
-        )
-
-        # Create a regular DataLoader
-        test_dataloader = DataLoader(
-            test_dataset,
-            batch_size=config.sample.test_batch_size,
-            collate_fn=TextPromptDataset.collate_fn,
-            shuffle=False,
-            num_workers=8,
-        )
-    
-    elif config.prompt_fn == "geneval":
-        train_dataset = GenevalPromptDataset(config.dataset, 'train')
-        test_dataset = GenevalPromptDataset(config.dataset, 'test')
-
-        train_sampler = DistributedKRepeatSampler( 
-            dataset=train_dataset,
-            batch_size=config.sample.train_batch_size,
-            k=config.sample.num_image_per_prompt,
-            num_replicas=accelerator.num_processes,
-            rank=accelerator.process_index,
-            seed=42
-        )
-
-        train_dataloader = DataLoader(
-            train_dataset,
-            batch_sampler=train_sampler,
-            num_workers=1,
-            collate_fn=GenevalPromptDataset.collate_fn,
-            # persistent_workers=True
-        )
-        test_dataloader = DataLoader(
-            test_dataset,
-            batch_size=config.sample.test_batch_size,
-            collate_fn=GenevalPromptDataset.collate_fn,
-            shuffle=False,
-            num_workers=8,
-        )
-    else:
-        raise NotImplementedError("Only general_ocr is supported with dataset")
-
-
-    neg_prompt_embed, neg_pooled_prompt_embed = compute_text_embeddings([""], text_encoders, tokenizers, max_sequence_length=128, device=accelerator.device)
-
-    sample_neg_prompt_embeds = neg_prompt_embed.repeat(config.sample.train_batch_size, 1, 1)
-    train_neg_prompt_embeds = neg_prompt_embed.repeat(config.train.batch_size, 1, 1)
-    sample_neg_pooled_prompt_embeds = neg_pooled_prompt_embed.repeat(config.sample.train_batch_size, 1)
-    train_neg_pooled_prompt_embeds = neg_pooled_prompt_embed.repeat(config.train.batch_size, 1)
+    train_dataloader = DataLoader(
+        train_dataset,
+        batch_sampler=train_sampler,
+        num_workers=0,
+        collate_fn=GenevalPromptImageDataset.collate_fn,
+        # persistent_workers=True
+    )
+    test_dataloader = DataLoader(
+        test_dataset,
+        batch_size=config.sample.test_batch_size,
+        collate_fn=GenevalPromptImageDataset.collate_fn,
+        shuffle=False,
+        num_workers=8,
+    )
 
     if config.sample.num_image_per_prompt == 1:
         config.per_prompt_stat_tracking = False
@@ -555,9 +505,22 @@ def main(_):
     autocast = contextlib.nullcontext if config.use_lora else accelerator.autocast
     # autocast = accelerator.autocast
 
+    # for deepspeed zero
+    if accelerator.state.deepspeed_plugin:
+        accelerator.state.deepspeed_plugin.deepspeed_config['train_micro_batch_size_per_gpu'] = config.sample.train_batch_size
+    # prepare prompt and reward fn
+    if is_deepspeed_zero3_enabled():
+        # Using deepspeed zero3 will cause the model parameter `weight.shape` to be empty.
+        unset_hf_deepspeed_config()
+        reward_fn = getattr(flow_grpo.rewards, 'multi_score')(accelerator.device, config.reward_fn)
+        eval_reward_fn = getattr(flow_grpo.rewards, 'multi_score')(accelerator.device, config.reward_fn)
+        set_hf_deepspeed_config(accelerator.state.deepspeed_plugin.dschf)
+    else:
+        reward_fn = getattr(flow_grpo.rewards, 'multi_score')(accelerator.device, config.reward_fn)
+        eval_reward_fn = getattr(flow_grpo.rewards, 'multi_score')(accelerator.device, config.reward_fn)
+    
     # Prepare everything with our `accelerator`.
     transformer, optimizer, train_dataloader, test_dataloader = accelerator.prepare(transformer, optimizer, train_dataloader, test_dataloader)
-
     # executor to perform callbacks asynchronously. this is beneficial for the llava callbacks which makes a request to a
     # remote server running llava inference.
     executor = futures.ThreadPoolExecutor(max_workers=8)
@@ -602,9 +565,8 @@ def main(_):
         pipeline.transformer.eval()
         if epoch % config.eval_freq == 0:
             eval(pipeline, test_dataloader, text_encoders, tokenizers, config, accelerator, global_step, eval_reward_fn, executor, autocast, num_train_timesteps, ema, transformer_trainable_parameters)
-        if epoch % config.save_freq == 0 and epoch > 0 and accelerator.is_main_process:
+        if epoch % config.save_freq == 0 and accelerator.is_main_process:
             save_ckpt(config.save_dir, transformer, global_step, accelerator, ema, transformer_trainable_parameters, config)
-
         #################### SAMPLING ####################
         pipeline.transformer.eval()
         samples = []
@@ -616,7 +578,8 @@ def main(_):
             position=0,
         ):
             train_sampler.set_epoch(epoch * config.sample.num_batches_per_epoch + i)
-            prompts, prompt_metadata = next(train_iter)
+            prompts, prompt_metadata, ref_images, prompt_with_image_paths = next(train_iter)
+            ref_images = [ref_image.resize((config.resolution, config.resolution)) for ref_image in ref_images]
 
             prompt_embeds, pooled_prompt_embeds = compute_text_embeddings(
                 prompts, 
@@ -625,8 +588,9 @@ def main(_):
                 max_sequence_length=128, 
                 device=accelerator.device
             )
+            # the input of edit task is determined by both the image and the edit prompt
             prompt_ids = tokenizers[0](
-                prompts,
+                prompt_with_image_paths,
                 padding="max_length",
                 max_length=256,
                 truncation=True,
@@ -640,24 +604,22 @@ def main(_):
                 generator = None
             with autocast():
                 with torch.no_grad():
-                    images, latents, log_probs = pipeline_with_logprob(
+                    images, latents, latent_ids, text_ids, log_probs, image_latents = pipeline_with_logprob(
                         pipeline,
+                        image=ref_images,
                         prompt_embeds=prompt_embeds,
                         pooled_prompt_embeds=pooled_prompt_embeds,
-                        negative_prompt_embeds=sample_neg_prompt_embeds,
-                        negative_pooled_prompt_embeds=sample_neg_pooled_prompt_embeds,
                         num_inference_steps=config.sample.num_steps,
                         guidance_scale=config.sample.guidance_scale,
                         output_type="pt",
                         height=config.resolution,
                         width=config.resolution, 
+                        max_area=config.resolution*config.resolution,
                         noise_level=config.sample.noise_level,
                         generator=generator
-                )
+                    )
 
-            latents = torch.stack(
-                latents, dim=1
-            )  # (batch_size, num_steps + 1, 16, 96, 96)
+            latents = torch.stack(latents, dim=1)  # (batch_size, num_steps + 1, 16, 96, 96)
             log_probs = torch.stack(log_probs, dim=1)  # shape after stack (batch_size, num_steps)
 
             timesteps = pipeline.scheduler.timesteps.repeat(
@@ -665,15 +627,17 @@ def main(_):
             )  # (batch_size, num_steps)
 
             # compute rewards asynchronously
-            rewards = executor.submit(reward_fn, images, prompts, prompt_metadata, only_strict=True)
+            rewards = executor.submit(reward_fn, images, prompts, prompt_metadata, ref_images, only_strict=True)
             # yield to to make sure reward computation starts
             time.sleep(0)
-
             samples.append(
                 {
                     "prompt_ids": prompt_ids,
                     "prompt_embeds": prompt_embeds,
                     "pooled_prompt_embeds": pooled_prompt_embeds,
+                    "latent_ids": latent_ids.unsqueeze(0).repeat(len(prompt_ids),1,1),
+                    "image_latents": image_latents,
+                    "text_ids": text_ids.unsqueeze(0).repeat(len(prompt_ids),1,1),
                     "timesteps": timesteps,
                     "latents": latents[
                         :, :-1
@@ -720,7 +684,7 @@ def main(_):
                 for idx, i in enumerate(sample_indices):
                     image = images[i]
                     pil = Image.fromarray(
-                        (image.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
+                        (image.float().cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
                     )
                     pil = pil.resize((config.resolution, config.resolution))
                     pil.save(os.path.join(tmpdir, f"{idx}.jpg"))  # 使用新的索引
@@ -745,7 +709,7 @@ def main(_):
         samples["rewards"]["avg"] = samples["rewards"]["avg"].unsqueeze(1).repeat(1, num_train_timesteps)
         # gather rewards across processes
         gathered_rewards = {key: accelerator.gather(value) for key, value in samples["rewards"].items()}
-        gathered_rewards = {key: value.cpu().numpy() for key, value in gathered_rewards.items()}
+        gathered_rewards = {key: value.float().cpu().numpy() for key, value in gathered_rewards.items()}
         # log rewards and images
         if accelerator.is_main_process:
             wandb.log(
@@ -759,7 +723,7 @@ def main(_):
         # per-prompt mean/std tracking
         if config.per_prompt_stat_tracking:
             # gather the prompts across processes
-            prompt_ids = accelerator.gather(samples["prompt_ids"]).cpu().numpy()
+            prompt_ids = accelerator.gather(samples["prompt_ids"]).float().cpu().numpy()
             prompts = pipeline.tokenizer.batch_decode(
                 prompt_ids, skip_special_tokens=True
             )
@@ -822,10 +786,7 @@ def main(_):
         samples = {k: v[mask] for k, v in samples.items()}
 
         total_batch_size, num_timesteps = samples["timesteps"].shape
-        # assert (
-        #     total_batch_size
-        #     == config.sample.train_batch_size * config.sample.num_batches_per_epoch
-        # )
+
         assert num_timesteps == config.sample.num_steps
 
         #################### TRAINING ####################
@@ -854,18 +815,6 @@ def main(_):
                 position=0,
                 disable=not accelerator.is_local_main_process,
             ):
-                if config.train.cfg:
-                    # concat negative prompts to sample prompts to avoid two forward passes
-                    embeds = torch.cat(
-                        [train_neg_prompt_embeds[:len(sample["prompt_embeds"])], sample["prompt_embeds"]]
-                    )
-                    pooled_embeds = torch.cat(
-                        [train_neg_pooled_prompt_embeds[:len(sample["pooled_prompt_embeds"])], sample["pooled_prompt_embeds"]]
-                    )
-                else:
-                    embeds = sample["prompt_embeds"]
-                    pooled_embeds = sample["pooled_prompt_embeds"]
-
                 train_timesteps = [step_index  for step_index in range(num_train_timesteps)]
                 for j in tqdm(
                     train_timesteps,
@@ -876,11 +825,11 @@ def main(_):
                 ):
                     with accelerator.accumulate(transformer):
                         with autocast():
-                            prev_sample, log_prob, prev_sample_mean, std_dev_t = compute_log_prob(transformer, pipeline, sample, j, embeds, pooled_embeds, config)
+                            prev_sample, log_prob, prev_sample_mean, std_dev_t = compute_log_prob(transformer, pipeline, sample, j, config)
                             if config.train.beta > 0:
                                 with torch.no_grad():
                                     with transformer.module.disable_adapter():
-                                        _, _, prev_sample_mean_ref, _ = compute_log_prob(transformer, pipeline, sample, j, embeds, pooled_embeds, config)
+                                        prev_sample_ref, log_prob_ref, prev_sample_mean_ref, std_dev_t_ref = compute_log_prob(transformer, pipeline, sample, j, config)
 
                         # grpo logic
                         advantages = torch.clamp(
@@ -897,7 +846,7 @@ def main(_):
                         )
                         policy_loss = torch.mean(torch.maximum(unclipped_loss, clipped_loss))
                         if config.train.beta > 0:
-                            kl_loss = ((prev_sample_mean - prev_sample_mean_ref) ** 2).mean(dim=(1,2,3), keepdim=True) / (2 * std_dev_t ** 2)
+                            kl_loss = ((prev_sample_mean - prev_sample_mean_ref) ** 2).mean(dim=(1,2), keepdim=True) / (2 * std_dev_t ** 2)
                             kl_loss = torch.mean(kl_loss)
                             loss = policy_loss + config.train.beta * kl_loss
                         else:

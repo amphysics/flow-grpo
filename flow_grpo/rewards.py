@@ -44,6 +44,39 @@ def aesthetic_score():
 
     return _fn
 
+def clip_score():
+    from flow_grpo.clip_scorer import ClipScorer
+
+    scorer = ClipScorer(dtype=torch.float32).cuda()
+
+    def _fn(images, prompts, metadata):
+        if not isinstance(images, torch.Tensor):
+            images = images.transpose(0, 3, 1, 2)  # NHWC -> NCHW
+            images = torch.tensor(images, dtype=torch.uint8)/255.0
+        scores = scorer(images, prompts)
+        return scores, {}
+
+    return _fn
+
+def image_similarity_score(device):
+    from flow_grpo.clip_scorer import ClipScorer
+
+    scorer = ClipScorer(device=device).cuda()
+
+    def _fn(images, ref_images):
+        if not isinstance(images, torch.Tensor):
+            images = images.transpose(0, 3, 1, 2)  # NHWC -> NCHW
+            images = torch.tensor(images, dtype=torch.uint8)/255.0
+        if not isinstance(ref_images, torch.Tensor):
+            ref_images = [np.array(img) for img in ref_images]
+            ref_images = np.array(ref_images)
+            ref_images = ref_images.transpose(0, 3, 1, 2)  # NHWC -> NCHW
+            ref_images = torch.tensor(ref_images, dtype=torch.uint8)/255.0
+        scores = scorer.image_similarity(images, ref_images)
+        return scores, {}
+
+    return _fn
+
 def pickscore_score(device):
     from flow_grpo.pickscore_scorer import PickScoreScorer
 
@@ -107,6 +140,23 @@ def ocr_score(device):
 
     return _fn
 
+def video_ocr_score(device):
+    from flow_grpo.ocr import OcrScorer_video_or_image
+
+    scorer = OcrScorer_video_or_image()
+
+    def _fn(images, prompts, metadata):
+        if isinstance(images, torch.Tensor):
+            if images.dim() == 4 and images.shape[1] == 3:
+                images = images.permute(0, 2, 3, 1) 
+            elif images.dim() == 5 and images.shape[2] == 3:
+                images = images.permute(0, 1, 3, 4, 2)
+            images = (images * 255).round().clamp(0, 255).to(torch.uint8).cpu().numpy()
+        scores = scorer(images, prompts)
+        # change tensor to list
+        return scores, {}
+
+    return _fn
 
 def deqa_score_remote(device):
     """Submits images to DeQA and computes a reward.
@@ -361,6 +411,7 @@ def multi_score(device, score_dict):
     score_functions = {
         "deqa": deqa_score_remote,
         "ocr": ocr_score,
+        "video_ocr": video_ocr_score,
         "imagereward": imagereward_score,
         "pickscore": pickscore_score,
         "qwenvl": qwenvl_score,
@@ -368,13 +419,15 @@ def multi_score(device, score_dict):
         "jpeg_compressibility": jpeg_compressibility,
         "unifiedreward": unifiedreward_score_sglang,
         "geneval": geneval_score,
+        "clipscore": clip_score,
+        "image_similarity": image_similarity_score,
     }
     score_fns={}
     for score_name, weight in score_dict.items():
         score_fns[score_name] = score_functions[score_name](device) if 'device' in score_functions[score_name].__code__.co_varnames else score_functions[score_name]()
 
     # only_strict is only for geneval. During training, only the strict reward is needed, and non-strict rewards don't need to be computed, reducing reward calculation time.
-    def _fn(images, prompts, metadata, only_strict=True):
+    def _fn(images, prompts, metadata, ref_images=None, only_strict=True):
         total_scores = []
         score_details = {}
         
@@ -387,6 +440,8 @@ def multi_score(device, score_dict):
                     score_details[f'{key}_strict_accuracy'] = value
                 for key, value in group_rewards.items():
                     score_details[f'{key}_accuracy'] = value
+            elif score_name == "image_similarity":
+                scores, rewards = score_fns[score_name](images, ref_images)
             else:
                 scores, rewards = score_fns[score_name](images, prompts, metadata)
             score_details[score_name] = scores

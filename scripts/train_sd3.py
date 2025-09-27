@@ -87,6 +87,7 @@ class DistributedKRepeatSampler(Sampler):
         
         # Compute the number of unique samples needed per iteration
         self.total_samples = self.num_replicas * self.batch_size
+        print("XX ", self.num_replicas ,  self.batch_size, self.k )
         assert self.total_samples % self.k == 0, f"k can not divide n*b, k{k}-num_replicas{num_replicas}-batch_size{batch_size}"
         self.m = self.total_samples // self.k  # Number of unique samples
         self.epoch = 0

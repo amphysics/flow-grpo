@@ -460,10 +460,10 @@ def main(_):
         weight_decay=config.train.adam_weight_decay,
         eps=config.train.adam_epsilon,
     )
-
+    print("CASDFASDFdsf ", config.reward_fn)
     # prepare prompt and reward fn
-    reward_fn = getattr(flow_grpo.rewards, 'multi_score')(accelerator.device, config.reward_fn)
-    eval_reward_fn = getattr(flow_grpo.rewards, 'multi_score')(accelerator.device, config.reward_fn)
+    reward_fn = getattr(flow_grpo.rewards, 'multi_score')(accelerator.device, {"pickscore":1})
+    eval_reward_fn = getattr(flow_grpo.rewards, 'multi_score')(accelerator.device, {"pickscore":1})
 
     if config.prompt_fn == "general_ocr":
         train_dataset = TextPromptDataset(config.dataset, 'train')

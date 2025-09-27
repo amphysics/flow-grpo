@@ -32,7 +32,7 @@ setup(
         # "flash-attn==2.7.4.post1",
         "deepspeed==0.16.4",  
         "peft==0.10.0",       
-        "bitsandbytes==0.45.3",
+        "bitsandbytes==0.46",
         
         "aiohttp==3.11.13",
         "fastapi==0.115.11", 

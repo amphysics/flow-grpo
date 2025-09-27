@@ -577,6 +577,13 @@ def main(_):
     )
 
     logger.info("***** Running training *****")
+    if torch.cuda.is_available():
+        logger.info("CUDA is available. You can use your GPU.")
+        logger.info(f"Number of CUDA devices: {torch.cuda.device_count()}")
+        print(f"Current CUDA device name: {torch.cuda.get_device_name(0)}") # Assuming you want to check the first device
+    else:
+        logger.info("CUDA is not available. Using CPU instead.")
+
     logger.info(f"  Sample batch size per device = {config.sample.train_batch_size}")
     logger.info(f"  Train batch size per device = {config.train.batch_size}")
     logger.info(

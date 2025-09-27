@@ -261,8 +261,8 @@ def eval(pipeline, test_dataloader, text_encoders, tokenizers, config, accelerat
         # yield to to make sure reward computation starts
         time.sleep(0)
         rewards, reward_metadata = rewards.result()
-
-        for key, value in rewards.items():
+        rewards_result["pickscore"] = rewards
+        for key, value in rewards_result.items():
             rewards_gather = accelerator.gather(torch.as_tensor(value, device=accelerator.device)).cpu().numpy()
             all_rewards[key].append(rewards_gather)
     

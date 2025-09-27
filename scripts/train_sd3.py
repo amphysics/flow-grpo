@@ -728,18 +728,6 @@ def main(_):
                 sampled_prompts = [prompts[i] for i in sample_indices]
                 sampled_rewards = [rewards['avg'][i] for i in sample_indices]
 
-                wandb.log(
-                    {
-                        "images": [
-                            wandb.Image(
-                                os.path.join(tmpdir, f"{idx}.jpg"),
-                                caption=f"{prompt:.100} | avg: {avg_reward:.2f}",
-                            )
-                            for idx, (prompt, avg_reward) in enumerate(zip(sampled_prompts, sampled_rewards))
-                        ],
-                    },
-                    step=global_step,
-                )
         samples["rewards"]["ori_avg"] = samples["rewards"]["avg"]
         # The purpose of repeating `adv` along the timestep dimension here is to make it easier to introduce timestep-dependent advantages later, such as adding a KL reward.
         samples["rewards"]["avg"] = samples["rewards"]["avg"].unsqueeze(1).repeat(1, num_train_timesteps)

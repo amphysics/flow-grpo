@@ -82,7 +82,7 @@ def pickscore_score(device):
 
     scorer = PickScoreScorer(dtype=torch.float32, device=device)
 
-    def _fn(images, prompts, metadata, only_strict):
+    def _fn(images, prompts, metadata):
         if isinstance(images, torch.Tensor):
             images = (images * 255).round().clamp(0, 255).to(torch.uint8).cpu().numpy()
             images = images.transpose(0, 2, 3, 1)  # NCHW -> NHWC

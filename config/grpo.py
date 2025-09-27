@@ -40,7 +40,7 @@ def general_ocr_wan2_1():
     config.height = 240
     config.width = 416
     config.frames = 33
-    config.sample.train_batch_size = 2
+    config.sample.train_batch_size = 8
     config.sample.num_image_per_prompt = 4 # 12
     config.sample.num_batches_per_epoch = 2
     config.sample.sample_time_per_prompt = 1
@@ -92,7 +92,7 @@ def general_ocr_sd3():
     config.sample.guidance_scale = 4.5
 
     config.resolution = 512
-    config.sample.train_batch_size = 2
+    config.sample.train_batch_size = 8
     config.sample.num_image_per_prompt = 24
     config.sample.num_batches_per_epoch = int(48/(gpu_number*config.sample.train_batch_size/config.sample.num_image_per_prompt))
     assert config.sample.num_batches_per_epoch % 2 == 0, "Please set config.sample.num_batches_per_epoch to an even number! This ensures that config.train.gradient_accumulation_steps = config.sample.num_batches_per_epoch / 2, so that gradients are updated twice per epoch."
@@ -134,7 +134,7 @@ def geneval_sd3():
     config.sample.guidance_scale = 4.5
 
     config.resolution = 512
-    config.sample.train_batch_size = 2
+    config.sample.train_batch_size = 8
     config.sample.num_image_per_prompt = 24
     config.sample.num_batches_per_epoch = int(48/(gpu_number*config.sample.train_batch_size/config.sample.num_image_per_prompt))
     assert config.sample.num_batches_per_epoch % 2 == 0, "Please set config.sample.num_batches_per_epoch to an even number! This ensures that config.train.gradient_accumulation_steps = config.sample.num_batches_per_epoch / 2, so that gradients are updated twice per epoch."
@@ -172,7 +172,7 @@ def pickscore_sd3():
     config.sample.guidance_scale = 4.5
 
     config.resolution = 512
-    config.sample.train_batch_size = 2
+    config.sample.train_batch_size = 8
     config.sample.num_image_per_prompt = 24
     config.sample.num_batches_per_epoch = int(48/(gpu_number*config.sample.train_batch_size/config.sample.num_image_per_prompt))
     assert config.sample.num_batches_per_epoch % 2 == 0, "Please set config.sample.num_batches_per_epoch to an even number! This ensures that config.train.gradient_accumulation_steps = config.sample.num_batches_per_epoch / 2, so that gradients are updated twice per epoch."
@@ -210,7 +210,7 @@ def clipscore_sd3():
     config.sample.guidance_scale = 4.5
 
     config.resolution = 512
-    config.sample.train_batch_size = 2
+    config.sample.train_batch_size = 8
     config.sample.num_image_per_prompt = 24
     config.sample.num_batches_per_epoch = int(48/(gpu_number*config.sample.train_batch_size/config.sample.num_image_per_prompt))
     assert config.sample.num_batches_per_epoch % 2 == 0, "Please set config.sample.num_batches_per_epoch to an even number! This ensures that config.train.gradient_accumulation_steps = config.sample.num_batches_per_epoch / 2, so that gradients are updated twice per epoch."
@@ -290,7 +290,7 @@ def general_ocr_sd3_4gpu():
     config.sample.guidance_scale = 4.5
 
     config.resolution = 512
-    config.sample.train_batch_size = 2
+    config.sample.train_batch_size = 8
     config.sample.num_image_per_prompt = 16
     config.sample.num_batches_per_epoch = int(16/(gpu_number*config.sample.train_batch_size/config.sample.num_image_per_prompt))
     assert config.sample.num_batches_per_epoch % 2 == 0, "Please set config.sample.num_batches_per_epoch to an even number! This ensures that config.train.gradient_accumulation_steps = config.sample.num_batches_per_epoch / 2, so that gradients are updated twice per epoch."
@@ -331,7 +331,7 @@ def pickscore_sd3_4gpu():
     config.sample.guidance_scale = 4.5
 
     config.resolution = 512
-    config.sample.train_batch_size = 2
+    config.sample.train_batch_size = 8
     config.sample.num_image_per_prompt = 16
     config.sample.num_batches_per_epoch = int(16/(gpu_number*config.sample.train_batch_size/config.sample.num_image_per_prompt))
     assert config.sample.num_batches_per_epoch % 2 == 0, "Please set config.sample.num_batches_per_epoch to an even number! This ensures that config.train.gradient_accumulation_steps = config.sample.num_batches_per_epoch / 2, so that gradients are updated twice per epoch."
@@ -369,7 +369,7 @@ def general_ocr_sd3_1gpu():
     config.sample.guidance_scale = 4.5
 
     config.resolution = 512
-    config.sample.train_batch_size = 2
+    config.sample.train_batch_size = 8
     config.sample.num_image_per_prompt = 8
     config.sample.num_batches_per_epoch = int(8/(gpu_number*config.sample.train_batch_size/config.sample.num_image_per_prompt))
     assert config.sample.num_batches_per_epoch % 2 == 0, "Please set config.sample.num_batches_per_epoch to an even number! This ensures that config.train.gradient_accumulation_steps = config.sample.num_batches_per_epoch / 2, so that gradients are updated twice per epoch."
@@ -409,7 +409,7 @@ def pickscore_flux():
     config.sample.guidance_scale = 3.5
 
     config.resolution = 512
-    config.sample.train_batch_size = 2
+    config.sample.train_batch_size = 8
     config.sample.num_image_per_prompt = 24
     config.sample.num_batches_per_epoch = int(48/(gpu_number*config.sample.train_batch_size/config.sample.num_image_per_prompt))
     assert config.sample.num_batches_per_epoch % 2 == 0, "Please set config.sample.num_batches_per_epoch to an even number! This ensures that config.train.gradient_accumulation_steps = config.sample.num_batches_per_epoch / 2, so that gradients are updated twice per epoch."
@@ -449,7 +449,7 @@ def pickscore_flux_8gpu():
     config.sample.guidance_scale = 3.5
 
     config.resolution = 512
-    config.sample.train_batch_size = 2
+    config.sample.train_batch_size = 8
     config.sample.num_image_per_prompt = 24
     config.sample.num_batches_per_epoch = int(48/(gpu_number*config.sample.train_batch_size/config.sample.num_image_per_prompt))
     assert config.sample.num_batches_per_epoch % 2 == 0, "Please set config.sample.num_batches_per_epoch to an even number! This ensures that config.train.gradient_accumulation_steps = config.sample.num_batches_per_epoch / 2, so that gradients are updated twice per epoch."

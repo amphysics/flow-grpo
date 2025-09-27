@@ -408,6 +408,7 @@ def unifiedreward_score_sglang(device):
     return _fn
 
 def multi_score(device, score_dict):
+    '''
     score_functions = {
         "deqa": deqa_score_remote,
         "ocr": ocr_score,
@@ -421,6 +422,10 @@ def multi_score(device, score_dict):
         "geneval": geneval_score,
         "clipscore": clip_score,
         "image_similarity": image_similarity_score,
+    }
+    '''
+    score_functions = {
+        "pickscore": pickscore_score,
     }
     score_fns={}
     for score_name, weight in score_dict.items():

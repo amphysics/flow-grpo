@@ -281,7 +281,7 @@ def eval(pipeline, test_dataloader, text_encoders, tokenizers, config, accelerat
         last_batch_prompt_ids_gather, skip_special_tokens=True
     )
     last_batch_rewards_gather = {}
-    for key, value in rewards.items():
+    for key, value in rewards_result.items():
         last_batch_rewards_gather[key] = accelerator.gather(torch.as_tensor(value, device=accelerator.device)).cpu().numpy()
 
     all_rewards = {key: np.concatenate(value) for key, value in all_rewards.items()}
@@ -693,10 +693,16 @@ def main(_):
             position=0,
         ):
             rewards, reward_metadata = sample["rewards"].result()
+            total_rewards = {}
+            if torch.is_tensor(rewards):
+                total_rewards = {}
+                total_rewards["pickscore"] = rewards
+            else:
+                total_rewards = rewards
             # accelerator.print(reward_metadata)
             sample["rewards"] = {
                 key: torch.as_tensor(value, device=accelerator.device).float()
-                for key, value in rewards.items()
+                for key, value in total_rewards.items()
             }
 
         # collate samples into dict where each entry has shape (num_batches_per_epoch * sample.batch_size, ...)

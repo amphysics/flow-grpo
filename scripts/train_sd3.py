@@ -280,7 +280,7 @@ def eval(pipeline, test_dataloader, text_encoders, tokenizers, config, accelerat
         last_batch_prompt_ids_gather, skip_special_tokens=True
     )
     last_batch_rewards_gather = {}
-    for key, value in rewards_result.items():
+    for key, value in rewards.items():
         last_batch_rewards_gather[key] = accelerator.gather(torch.as_tensor(value, device=accelerator.device)).cpu().numpy()
 
     all_rewards = {key: np.concatenate(value) for key, value in all_rewards.items()}

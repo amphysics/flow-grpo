@@ -88,7 +88,7 @@ def general_ocr_sd3():
     # sd3.5 medium
     config.pretrained.model = "stabilityai/stable-diffusion-3.5-medium"
     config.sample.num_steps = 10
-    config.sample.eval_num_steps = 40
+    config.sample.eval_num_steps = 20
     config.sample.guidance_scale = 4.5
 
     config.resolution = 512
@@ -130,7 +130,7 @@ def geneval_sd3():
     # sd3.5 medium
     config.pretrained.model = "stabilityai/stable-diffusion-3.5-medium"
     config.sample.num_steps = 10
-    config.sample.eval_num_steps = 40
+    config.sample.eval_num_steps = 20
     config.sample.guidance_scale = 4.5
 
     config.resolution = 512
@@ -168,7 +168,7 @@ def pickscore_sd3():
     # sd3.5 medium
     config.pretrained.model = "stabilityai/stable-diffusion-3.5-medium"
     config.sample.num_steps = 10
-    config.sample.eval_num_steps = 40
+    config.sample.eval_num_steps = 20
     config.sample.guidance_scale = 4.5
 
     config.resolution = 512
@@ -206,7 +206,7 @@ def clipscore_sd3():
     # sd3.5 medium
     config.pretrained.model = "stabilityai/stable-diffusion-3.5-medium"
     config.sample.num_steps = 10
-    config.sample.eval_num_steps = 40
+    config.sample.eval_num_steps = 20
     config.sample.guidance_scale = 4.5
 
     config.resolution = 512
@@ -245,7 +245,7 @@ def pickscore_sd3_fast():
     config.pretrained.model = "stabilityai/stable-diffusion-3.5-medium"
     config.sample.num_steps = 10
     config.sample.train_num_steps = 2
-    config.sample.eval_num_steps = 40
+    config.sample.eval_num_steps = 20
     config.sample.guidance_scale = 4.5
 
     config.resolution = 512
@@ -286,7 +286,7 @@ def general_ocr_sd3_4gpu():
     # sd3.5 medium
     config.pretrained.model = "stabilityai/stable-diffusion-3.5-medium"
     config.sample.num_steps = 10
-    config.sample.eval_num_steps = 40
+    config.sample.eval_num_steps = 20
     config.sample.guidance_scale = 4.5
 
     config.resolution = 512
@@ -327,7 +327,7 @@ def pickscore_sd3_4gpu():
     # sd3.5 medium
     config.pretrained.model = "stabilityai/stable-diffusion-3.5-medium"
     config.sample.num_steps = 10
-    config.sample.eval_num_steps = 40
+    config.sample.eval_num_steps = 20
     config.sample.guidance_scale = 4.5
 
     config.resolution = 512
@@ -365,7 +365,7 @@ def general_ocr_sd3_1gpu():
     # sd3.5 medium
     config.pretrained.model = "stabilityai/stable-diffusion-3.5-medium"
     config.sample.num_steps = 10
-    config.sample.eval_num_steps = 40
+    config.sample.eval_num_steps = 20
     config.sample.guidance_scale = 4.5
 
     config.resolution = 512
@@ -445,7 +445,7 @@ def pickscore_flux_8gpu():
     # flux
     config.pretrained.model = "black-forest-labs/FLUX.1-dev"
     config.sample.num_steps = 6
-    config.sample.eval_num_steps = 28
+    config.sample.eval_num_steps = 20
     config.sample.guidance_scale = 3.5
 
     config.resolution = 512

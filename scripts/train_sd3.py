@@ -737,6 +737,7 @@ def main(_):
         gathered_rewards = {key: accelerator.gather(value) for key, value in samples["rewards"].items()}
         gathered_rewards = {key: value.cpu().numpy() for key, value in gathered_rewards.items()}
         # log rewards and images
+        print("Record ", value)
         if accelerator.is_main_process:
             wandb.log(
                 {

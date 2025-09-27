@@ -731,6 +731,7 @@ def main(_):
                     pil.save(os.path.join(tmpdir, f"{idx}.jpg"))  # 使用新的索引
 
                 sampled_prompts = [prompts[i] for i in sample_indices]
+                print("YYY", rewards['avg'].shape)
                 sampled_rewards = [rewards['avg'][i] for i in sample_indices]
 
         samples["rewards"]["ori_avg"] = samples["rewards"]["avg"]
